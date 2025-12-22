@@ -3043,6 +3043,69 @@
             return days;
           };
           
+          // Calendario CRA per SINGOLO progetto
+          const generateCRAProjectCalendar = (year, month, projectId, engineerId) => {
+            const firstDay = new Date(year, month, 1);
+            const lastDay = new Date(year, month + 1, 0);
+            const daysInMonth = lastDay.getDate();
+            const startingDayOfWeek = firstDay.getDay();
+            const adjustedStart = startingDayOfWeek === 0 ? 6 : startingDayOfWeek - 1;
+            
+            const days = [];
+            for (let i = 0; i < adjustedStart; i++) days.push(null);
+            
+            const project = projects.find(p => p.id === projectId);
+            if (!project) return days;
+            
+            const planned = project.engineerMonthlyAllocation?.[engineerId] || {};
+            const actual = project.engineerActualAllocation?.[engineerId] || {};
+            const engineer = engineers.find(e => e.id === engineerId);
+            
+            for (let day = 1; day <= daysInMonth; day++) {
+              const date = new Date(year, month, day);
+              const dateStr = toLocalDateString(date);
+              
+              const otherProjects = projects.filter(p => 
+                p.id !== projectId && 
+                p.selectedEngineers?.includes(engineerId) &&
+                (p.engineerMonthlyAllocation?.[engineerId]?.[dateStr] || p.engineerActualAllocation?.[engineerId]?.[dateStr])
+              );
+              
+              const isUnavailable = engineer?.unavailability?.some(u => {
+                const start = new Date(u.startDate);
+                const end = new Date(u.endDate);
+                return date >= start && date <= end;
+              });
+              
+              const isFestivity = isHoliday(date);
+              const plannedDay = planned[dateStr] || 0;
+              const actualDay = actual[dateStr] || 0;
+              
+              let cellColor = 'bg-white';
+              if (isFestivity) cellColor = 'bg-gray-200';
+              else if (isUnavailable) cellColor = 'bg-yellow-100';
+              else if (otherProjects.length > 0) cellColor = 'bg-red-50';
+              else if (plannedDay > 0) {
+                if (actualDay === plannedDay) cellColor = 'bg-green-100';
+                else if (actualDay < plannedDay) cellColor = 'bg-yellow-100';
+                else cellColor = 'bg-orange-100';
+              }
+              
+              days.push({
+                day,
+                date: dateStr,
+                planned: plannedDay,
+                actual: actualDay,
+                hasOtherProjects: otherProjects.length > 0,
+                isUnavailable,
+                isFestivity,
+                isToday: dateStr === toLocalDateString(new Date()),
+                cellColor
+              });
+            }
+            return days;
+          };
+          
           // Click giorno CRA - selezione/deselezione
           const handleCRADayClick = (projectId, dayData) => {
             if (!dayData || !craApplyMode) return;
@@ -3064,12 +3127,31 @@
             });
           };
           
-          // Applica quantità giorni selezionati
+          // Applica quantità + controllo soldDays
           const applyCRAQuantity = (projectId, quantity) => {
+            const project = projects.find(p => p.id === projectId);
             const selectedDates = craSelectedDays[projectId] || {};
+            
+            // Calcola nuovo totale
+            const actual = project.engineerActualAllocation?.[currentEngineerId] || {};
+            let newTotal = Object.values(actual).reduce((sum, v) => sum + v, 0);
+            
+            Object.keys(selectedDates).forEach(date => {
+              newTotal -= (actual[date] || 0);
+              newTotal += quantity;
+            });
+            
+            // Warning se supera soldDays
+            if (project.soldDays > 0 && newTotal > project.soldDays) {
+              if (!confirm(`⚠️ Dépassement: ${newTotal.toFixed(1)}j / ${project.soldDays}j vendus.\nContinuer?`)) {
+                return;
+              }
+            }
+            
             Object.keys(selectedDates).forEach(date => {
               updateActualHours(projectId, date, quantity);
             });
+            
             setCraSelectedDays(prev => ({...prev, [projectId]: {}}));
             setCraApplyMode(false);
           };
@@ -6257,12 +6339,11 @@ ${!isReadOnly ? 'Glisser pour déplacer • Bordures pour redimensionner' : ''}`
                                         </div>
                                         
                                         <div className="grid grid-cols-7">
-                                          {generateCRAMultiProjectCalendar(craSelectedYear, craSelectedMonth, currentEngineerId).map((dayData, idx) => {
+                                          {generateCRAProjectCalendar(craSelectedYear, craSelectedMonth, project.id, currentEngineerId).map((dayData, idx) => {
                                             if (!dayData) {
-                                              return <div key={`empty-${idx}`} className="aspect-square border border-gray-200"></div>;
+                                              return <div key={`empty-${idx}`} className="border border-gray-200 h-16"></div>;
                                             }
                                             
-                                            const hasProjects = dayData.projects.length > 0;
                                             const isSelected = craSelectedDays[project.id]?.[dayData.date];
                                             
                                             return (
@@ -6270,38 +6351,33 @@ ${!isReadOnly ? 'Glisser pour déplacer • Bordures pour redimensionner' : ''}`
                                                 key={dayData.date}
                                                 onClick={(e) => {
                                                   e.stopPropagation();
-                                                  if (craApplyMode && (hasProjects || !dayData.isFestivity)) {
+                                                  if (craApplyMode && (dayData.planned > 0 || dayData.actual > 0)) {
                                                     handleCRADayClick(project.id, dayData);
                                                   }
                                                 }}
-                                                className={`aspect-square border border-gray-200 p-1 ${
-                                                  craApplyMode ? 'cursor-pointer hover:ring-2 hover:ring-[#e61252]' : ''
+                                                className={`border border-gray-200 p-1 h-16 ${
+                                                  craApplyMode && (dayData.planned > 0 || dayData.actual > 0) ? 'cursor-pointer hover:ring-2 hover:ring-[#e61252]' : ''
                                                 } ${isSelected ? 'ring-4 ring-[#e61252] bg-pink-50' : dayData.cellColor} ${
                                                   dayData.isToday ? 'ring-2 ring-blue-500' : ''
                                                 }`}
                                               >
-                                                <div className="h-full flex flex-col">
-                                                  <div className="text-sm font-semibold text-gray-700 mb-1">
+                                                <div className="h-full flex flex-col text-xs">
+                                                  <div className="font-semibold text-gray-700 flex items-center gap-1">
                                                     {dayData.day}
-                                                    {dayData.isToday && <span className="ml-1">⭐</span>}
-                                                    {isSelected && <span className="ml-1">✓</span>}
+                                                    {dayData.isToday && <span>⭐</span>}
+                                                    {isSelected && <span>✓</span>}
                                                   </div>
                                                   
-                                                  {hasProjects && (
-                                                    <div className="text-xs">
-                                                      <div className="font-bold text-[#e61252]">
-                                                        {dayData.projects.find(p => p.project.id === project.id)?.actual.toFixed(2) || 0}j
-                                                      </div>
+                                                  {(dayData.planned > 0 || dayData.actual > 0) && (
+                                                    <div className="text-xs mt-1">
+                                                      {dayData.planned > 0 && <div className="text-blue-600">P:{dayData.planned}</div>}
+                                                      {dayData.actual > 0 && <div className="text-green-600 font-bold">R:{dayData.actual}</div>}
                                                     </div>
                                                   )}
                                                   
-                                                  {dayData.isFestivity && (
-                                                    <div className="text-xs text-gray-600 mt-auto">🎉</div>
-                                                  )}
-                                                  
-                                                  {dayData.isUnavailable && !dayData.isFestivity && (
-                                                    <div className="text-xs text-yellow-700 mt-auto">🚫</div>
-                                                  )}
+                                                  {dayData.hasOtherProjects && <div className="text-red-600 mt-auto">🔴</div>}
+                                                  {dayData.isFestivity && <div className="text-gray-600 mt-auto">🎉</div>}
+                                                  {dayData.isUnavailable && !dayData.isFestivity && <div className="text-yellow-600 mt-auto">🚫</div>}
                                                 </div>
                                               </div>
                                             );
